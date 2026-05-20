@@ -3,12 +3,14 @@ Medical Segmentation Training - nanoGPT style configuration
 Simple, transparent, hackable.
 """
 import os
+from sys import platform
 import time
 from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+#from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler, autocast
 
 from dataset import get_dataloaders
 from loss import dice_loss
@@ -25,7 +27,7 @@ save_interval = 10
 device = 'cuda'
 
 # Data settings  
-data_dir = 'data/processed/Task01_BrainTumour/imagesTr'
+data_dir = 'data/processed/Task01_BrainTumour'
 input_shape = (64, 64, 64)  # target shape for all inputs
 batch_size = 2
 slice_mode = 'fullres'  # axi, cor, sag, fullres
@@ -67,15 +69,14 @@ compile_mode = 'default'  # default, reduce-overhead, max-autotune
 
 # Load config overrides
 import os
+import platform
 
 _config_path = os.path.join(os.path.dirname(__file__), 'config.py')
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(_config_path).read())
 
-
-# Convert to context for mixed precision
+# Define pytorch dtype used for mixed precision based on config
 ptdtype = {'float32': torch.float32, 'float16': torch.float16}[dtype]
-ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=ptdtype)
 
 def train(out_dir, eval_interval, log_interval, save_interval, device,
          data_dir, input_shape, batch_size, slice_mode,
@@ -142,13 +143,17 @@ def train(out_dir, eval_interval, log_interval, save_interval, device,
         deep_supervision=deep_supervision
     ).to(device_obj)
     
-    try:
-        print(f"Compiling model with mode='{compile_mode}'...")
-        model = torch.compile(model, mode=compile_mode)
-        print("Model compilation successful")
-    except Exception as e:
-        print(f"Warning: Failed to compile model: {e}")
-        print("Continuing with uncompiled model...")
+    if platform.system() != "Windows":
+        try:
+            print(f"Compiling model with mode='{compile_mode}'...")
+            model = torch.compile(model, mode=compile_mode)
+            print("Model compilation successful")
+        except Exception as e:
+            print(f"Warning: Failed to compile model: {e}")
+            print("Continuing with uncompiled model...")
+            compile_model = False
+    else: 
+        print("Warning: torch.compile() is not fully supported on Windows. Skipping compilation.")
         compile_model = False
     
     optimizer = get_optimizer(
@@ -171,7 +176,7 @@ def train(out_dir, eval_interval, log_interval, save_interval, device,
         gamma=gamma
     )
     
-    scaler = GradScaler() # For Mixed Precision
+    scaler = GradScaler(device = device) # For Mixed Precision
     
     print(f"Starting training on {device}...")
     print(f"- Model: UNet {num_stages} stages, {base_chs} base channels")
@@ -187,32 +192,33 @@ def train(out_dir, eval_interval, log_interval, save_interval, device,
         model.train()
         t0 = time.time()
         
-        for batch_idx, (images, masks) in enumerate(train_loader):
-            images = images.to(device_obj, non_blocking=True)
-            masks = masks.to(device_obj, non_blocking=True) # Index tensor [B, D, H, W]
+        for batch_idx, (batch, gt) in enumerate(train_loader):
+            batch = batch.to(device_obj, non_blocking=True)
+            gt = gt.to(device_obj, non_blocking=True) # Index tensor [B, D, H, W]
 
             # Mixed Precision Forward Pass
-            with autocast():
-                preds = model(images) # List of [Res1, Res2, ...] 
+            with autocast(device_type = device, dtype = ptdtype):
+                preds = model(batch) # List of [Res1, Res2, ...] 
                 
                 total_loss = 0
                 
                 # GPU-side one-hotting for Dice
-                # Doing this on GPU reduce CPU-GPU transfer overhead
-                t_onehot = F.one_hot(masks, num_classes=out_channels)
-                t_onehot = t_onehot.movedim(-1, 1).float()  # [B, ..., C] -> [B, C, ...]
-
+                # Doing this here on GPU reduce CPU-GPU transfer overhead
+                # Doing dice loss without one-hot encoding is very bad depending on the number of classes 
+                gt_shape = (gt.shape[0], out_channels, *gt.shape[1:]) 
+                gt_onehot = torch.zeros(gt_shape, device = device_obj, dtype = ptdtype)
+                gt_onehot.scatter_(1, gt.unsqueeze(1), 1)  # [B, D, H, W] -> [B, C, D, H, W]
+                
                 for i, p in enumerate(reversed(preds)):
-                    
                     stride = 2**i
-                    # Strided slicing for 2D and 3D masks
-                    stride_tuple = (...,) + (slice(None, None, stride),) * len(input_shape)
-                    t_idx = masks[stride_tuple]  
-                    t_onehot_idx = t_onehot[stride_tuple]
+                    # Strided views for 2D and 3D masks
+                    spatial_slices = (slice(None, None, stride),) * (gt.ndim - 1)
+                    gt_idx = gt[(slice(None), *spatial_slices)]
+                    gt_onehot_idx = gt_onehot[(slice(None), *spatial_slices)]
                     
                     # Loss Calculation
-                    loss_ce = F.cross_entropy(p, t_idx) # remove singleton channel dim
-                    loss_dice = dice_loss(F.softmax(p, dim=1), t_onehot_idx)
+                    loss_ce = F.cross_entropy(p, gt_idx) # remove singleton channel dim
+                    loss_dice = dice_loss(F.softmax(p, dim=1), gt_onehot_idx)
                     weight = 1 / (2**i)
                     total_loss += weight * (loss_ce + loss_dice)
             
@@ -225,27 +231,32 @@ def train(out_dir, eval_interval, log_interval, save_interval, device,
             
             # Log training progress
             if batch_idx % log_interval == 0:
+                dt = time.time() - t0
                 lr = scheduler.get_last_lr()[0]
-                print(f"Epoch {epoch+1}/{nb_epochs} [{batch_idx}/{len(train_loader)}] Loss: {total_loss.item():.4f} LR: {lr:.6f}")
-
+                print(f"Epoch {epoch+1}/{nb_epochs} [{batch_idx}/{len(train_loader)}] Loss: {total_loss.item():.4f} | LR: {lr:.6f} | Time: {dt:.2f}s")
+        
+        
         # 4. Validation 
-        model.eval()
-        val_dice = 0
-        with torch.no_grad():
-            for images, masks in val_loader:
-                images, masks = images.to(device), masks.to(device)
-                # In eval mode, UNet returns only the high-res tensor
-                out = model(images) 
-                
-                # Simple Dice Metric for monitoring
-                p = F.one_hot(out.argmax(dim = 1), num_classes=out_channels).movedim(-1, 1).float()
-                t = F.one_hot(masks, num_classes=out_channels).movedim(-1, 1).float()
-                
-                val_dice += (1 - dice_loss(p, t)) # 1 - (1-dice) = dice
+        if (epoch + 1) % eval_interval == 0:
+            model.eval()
+            val_dice = 0
+            with torch.no_grad():
+                for batch, gt in val_loader:
+                    batch, gt = batch.to(device), gt.to(device)
+                    # In eval mode, UNet returns only the high-res tensor
+                    p = model(batch) 
 
-        dt = time.time() - t0
-        print(f"Epoch {epoch+1}/{nb_epochs} | Loss: {total_loss.item():.4f} | Val Dice: {val_dice/len(val_loader):.4f} | Time: {dt:.2f}s")
-                   
+                    # Simple Dice Metric for monitoring
+                    gt_shape = (gt.shape[0], out_channels, *gt.shape[1:]) 
+                    gt_onehot = torch.zeros(gt_shape, device = device_obj, dtype = ptdtype)
+                    gt_onehot.scatter_(1, gt.unsqueeze(1), 1)
+                    
+                    p_onehot = p.argmax(dim = 1, keepdim = True)
+                    val_dice += (1 - dice_loss(p_onehot, gt_onehot)) # 1 - (1-dice) = dice
+
+            dt = time.time() - t0
+            print(f"Epoch {epoch+1}/{nb_epochs} | Loss: {total_loss.item():.4f} | Val Dice: {val_dice/len(val_loader):.4f} | Time: {dt:.2f}s")
+
         # 5. Save Checkpoint 
         if (epoch + 1) % save_interval == 0:
             checkpoint = {

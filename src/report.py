@@ -27,10 +27,10 @@ class SegmentationAnalysis:
 
 def analyze_segmentation_mask(
     pred_mask: np.ndarray,
-    target_mask: Optional[np.ndarray] = None,
-    voxel_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    target_mask=None,
+    voxel_spacing=(1.0, 1.0, 1.0),
     class_name: str = "unknown"
-) -> SegmentationAnalysis:
+):
     """
     Analyze a segmentation mask to extract quantitative metrics.
     
@@ -93,7 +93,7 @@ def analyze_segmentation_mask(
     )
 
 
-def calculate_shape_metrics(mask: np.ndarray, voxel_spacing: Tuple[float, float, float]) -> Dict[str, float]:
+def calculate_shape_metrics(mask: np.ndarray, voxel_spacing):
     """
     Calculate shape-based metrics for a segmentation mask.
     
@@ -142,8 +142,8 @@ def calculate_shape_metrics(mask: np.ndarray, voxel_spacing: Tuple[float, float,
 def generate_finding_description(
     analysis: SegmentationAnalysis,
     class_name: str,
-    severity_threshold: Dict[str, float] = None
-) -> str:
+    severity_threshold=None
+):
     """
     Generate a natural language description of a segmentation finding.
     
@@ -214,11 +214,11 @@ def generate_finding_description(
 
 def generate_comprehensive_report(
     predictions: torch.Tensor,
-    class_names: List[str],
-    voxel_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
-    ground_truth: Optional[torch.Tensor] = None,
-    patient_info: Optional[Dict[str, Any]] = None
-) -> str:
+    class_names,
+    voxel_spacing=(1.0, 1.0, 1.0),
+    ground_truth=None,
+    patient_info=None
+):
     """
     Generate a comprehensive radiology-style report from segmentation results.
     

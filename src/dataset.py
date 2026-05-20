@@ -1,4 +1,5 @@
 
+import json
 import os
 
 import numpy as np
@@ -24,63 +25,73 @@ class SegmentationDataset(Dataset):
         name = self.file_list[idx]
         
         # 1. Load data using memory mapping (no copy yet)
-        img_mmap = np.load(os.path.join(self.data_dir, 'images', name), mmap_mode='r')
-        mask_mmap = np.load(os.path.join(self.data_dir, 'masks', name), mmap_mode='r')[None]
-        
-        # 2. Apply slicing based on mode
-        slicer = [slice(None)] * (img_mmap.ndim - 1)
+        img_mmap = np.load(os.path.join(self.data_dir, name, 'image.npy'), mmap_mode='r')
+        mask_mmap = np.load(os.path.join(self.data_dir, name, 'label.npy'), mmap_mode='r')[None]
+        with open(os.path.join(self.data_dir, name, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
 
-        if self.slice_mode == "sag":
-            # Sagittal slice (YZ plane) - slice along X axis (axis 2 for 3D)
-            x = np.random.randint(img_mmap.shape[2])
-            slicer[2] = x
-        elif self.slice_mode == "cor":
-            # Coronal slice (XZ plane) - slice along Y axis (axis 1 for 3D)
-            y = np.random.randint(img_mmap.shape[1])
-            slicer[1] = y
-        elif self.slice_mode == "axi":
-            # Axial slice (XY plane) - slice along Z axis (axis 0 for 3D)
-            z = np.random.randint(img_mmap.shape[0])
-            slicer[0] = z
+        # 2. Apply slicing based on mode. Ensure meaningful patches by eagerly rejecting empty slices. 
+        
+        spatial_shape = img_mmap.shape[1:]  # Skip channel dimension
+        
+        axial_modes = ['axi', 'cor', 'sag']
+        axis_by_mode = {'sag': 3, 'cor': 2, 'axi': 1}
+        slicer = [slice(None)] * 4 # [C, H, W, D]
+
+
+        if self.slice_mode in axial_modes:
+            axis = axis_by_mode[self.slice_mode]
+            foreground_indexes = metadata['valid_tumor_indices'][self.slice_mode]
+            if np.random.rand() < 0.66 and foreground_indexes:
+                index = int(np.random.choice(foreground_indexes))
+            else:
+                index = int(np.random.randint(img_mmap.shape[axis]))
+            slicer[axis] = index
+        
+        
         elif self.slice_mode == "fullres":
-            # 3D patch extraction from full resolution volume
-            coords = []
-            for size, dim in zip(self.input_shape, img_mmap.shape):
+            
+            for mode, size, dim in zip(axial_modes, self.input_shape, spatial_shape):
+                axis = axis_by_mode[mode]
                 low = size // 2
                 high = dim - (size - size // 2) + 1
-                if high <= low:
-                    # If input_shape is larger than volume dimension, use full dimension
-                    coords.append(dim // 2)
+                
+                foreground_indexes = metadata['valid_tumor_indices'][mode]
+                if np.random.rand() < 0.66 and foreground_indexes:
+                    center = int(np.random.choice(foreground_indexes))
+                    center = int(np.clip(center, low, high - 1))
                 else:
-                    coords.append(np.random.randint(low, high))
+                    center = int(np.random.randint(low, high))
             
-            slicer = []
-            for coord, size in zip(coords, self.input_shape):
-                start = max(0, coord - size // 2)
+                start = center - size // 2
                 stop = start + size
-                slicer.append(slice(start, stop))
-        else:
-            raise ValueError(f"Unknown slice_mode: {self.slice_mode}")
+                slicer[axis] = slice(start, stop) 
 
-        # update the slicer to account for channel dimension
-        slicer = [slice(None)] + slicer    # Add slice for channel dimension at the beginning
+          
+                
         
-        # 3. Extract the slice/patch (this creates a copy)
-        img = img_mmap[tuple(slicer)]
-        mask = mask_mmap[tuple(slicer)]
-        img = torch.from_numpy(img.copy()).float()
-        mask = torch.from_numpy(mask.copy()).float()
+
+        # 3. Extract the slice/patch (this creates a copy of the sliced areas)
+        img = torch.from_numpy(img_mmap[tuple(slicer)].copy())
+        mask = torch.from_numpy(mask_mmap[tuple(slicer)].copy())
+        #np.save(f"{name}_sliced_array.npy", img.numpy())
+        #
+        #print(f"Image values range: [{img.min():.3f}, {img.max():.3f}]")
+        #print(f"Image MMAP values range: [{img_mmap.min():.3f}, {img_mmap.max():.3f}]")
+        #
+        #np.save(f"{name}_sliced_mask.npy", mask.numpy())
+        #print(f"Mask values range: [{mask.min():.3f}, {mask.max():.3f}]")
+        #print(f"Mask MMAP values range: [{mask_mmap.min():.3f}, {mask_mmap.max():.3f}]")
+
         
         # 5. Resize to exact target shape via padding/cropping
         # This ensures consistent input size for the model
         current_shape = img.shape[1:]  # Skip channel dimension
         target_shape = self.input_shape
-        
         if list(current_shape) != list(target_shape):
             # Calculate padding/cropping for each dimension
             pads = []
             crops = []
-            
             for curr, tgt in zip(reversed(current_shape), reversed(target_shape)):
                 if curr < tgt:
                     # Need padding
@@ -106,6 +117,8 @@ class SegmentationDataset(Dataset):
                 img = F.pad(img, pads, mode='constant', value=0)
                 mask = F.pad(mask, pads, mode='constant', value=0)
             
+            
+            
             # Apply cropping (reverse order since we reversed above)
             crops = crops[::-1]
             if any(c != slice(None) for c in crops):
@@ -113,6 +126,7 @@ class SegmentationDataset(Dataset):
                 img = img[crop_slice]
                 mask = mask[crop_slice]
 
+        
         # 6. Apply Augmentations
         if self.augment:
             img, mask = spatial_transform(img, mask)
@@ -127,59 +141,109 @@ class SegmentationDataset(Dataset):
                     mask = torch.flip(mask, dims=[i])      # no channel dim in mask
 
         # remove singleton channel dim & return 
-        mask = mask.squeeze().long() 
+        mask = mask[0].long()
+        
+
         return img, mask
 
 
-def get_dataloaders(data_dir, batch_size, slice_mode='fullres', input_shape=(32, 32, 32), 
-                   train_split=0.8, num_workers=4):
+def get_dataloaders(
+    data_dir,
+    batch_size,
+    slice_mode='fullres',
+    input_shape=(32, 32, 32),
+    train_split=0.8,
+    num_workers=0,
+    seed=42,
+):
     """
-    Create train/validation dataloaders following nanoGPT simplicity principles.
-    
-    Args:
-        data_dir: Path to processed data directory
-        batch_size: Batch size
-        slice_mode: Slicing mode ('axi', 'cor', 'sag', 'fullres')
-        input_shape: Target input shape for padding/cropping
-        train_split: Fraction of data to use for training
-        num_workers: Number of workers for data loading
-    
-    Returns:
-        tuple: (train_loader, val_loader)
+    Create train/validation dataloaders.
+
+    Expected layout:
+        data_dir/
+          case_name/
+            image.npy
+            label.npy
+            metadata.json
     """
-    images_dir = os.path.join(data_dir, "images")
-    if not os.path.exists(images_dir):
-        raise FileNotFoundError(f"Images directory not found: {images_dir}")
-    
-    file_list = [f for f in os.listdir(images_dir) if f.endswith('.npy')]
-    if not file_list:
-        raise ValueError(f"No .npy files found in {images_dir}")
-    
-    # Split into train/validation
-    split_idx = int(len(file_list) * train_split)
-    train_files = file_list[:split_idx]
-    val_files = file_list[split_idx:]
-    
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    if not 0 < train_split < 1:
+        raise ValueError(f"train_split must be between 0 and 1, got {train_split}")
+
+    required_files = ('image.npy', 'label.npy', 'metadata.json')
+    case_names = []
+
+    for name in sorted(os.listdir(data_dir)):
+        case_dir = os.path.join(data_dir, name)
+        if not os.path.isdir(case_dir):
+            continue
+
+        missing = [
+            filename for filename in required_files
+            if not os.path.isfile(os.path.join(case_dir, filename))
+        ]
+
+        if missing:
+            raise FileNotFoundError(
+                f"Missing files in {case_dir}: {missing}. "
+                f"Required: {list(required_files)}"
+            )
+
+        case_names.append(name)
+
+    if len(case_names) < 2:
+        raise ValueError(
+            f"Need at least 2 valid cases for train/val split, found {len(case_names)}"
+        )
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(case_names)
+
+    split_idx = int(len(case_names) * train_split)
+    train_files = case_names[:split_idx]
+    val_files = case_names[split_idx:]
+
+    if not train_files or not val_files:
+        raise ValueError(
+            f"Empty train/val split with {len(case_names)} cases and train_split={train_split}"
+        )
+
     # Create datasets
     train_dataset = SegmentationDataset(
-        data_dir, train_files, slice_mode=slice_mode, input_shape=input_shape,
-        augment=True
+        data_dir,
+        train_files,
+        slice_mode=slice_mode,
+        input_shape=input_shape,
+        augment=True,
     )
     val_dataset = SegmentationDataset(
-        data_dir, val_files, slice_mode=slice_mode, input_shape=input_shape,
-        augment=False
+        data_dir,
+        val_files,
+        slice_mode=slice_mode,
+        input_shape=input_shape,
+        augment=False,
     )
-    
-    # Create dataloaders
+
+    pin_memory = True if torch.cuda.is_available() else False
+
+    # create dataloaders
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, pin_memory=True
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
-    
+
     return train_loader, val_loader
 
 
@@ -193,18 +257,13 @@ if __name__ == "__main__":
     batch_size = 2
     
     # Test 1: Check if data directory exists
-    images_dir = os.path.join(data_dir, "images")
-    masks_dir = os.path.join(data_dir, "masks")
-    
-    if not os.path.exists(images_dir):
-        print(f"ERROR: Images directory not found: {images_dir}")
-        sys.exit(1)
-    if not os.path.exists(masks_dir):
-        print(f"ERROR: Masks directory not found: {masks_dir}")
+    case_dir = os.path.join(data_dir)    
+    if not os.path.exists(case_dir):
+        print(f"ERROR: Case directory not found: {case_dir}")
         sys.exit(1)
     
-    # Get test files (limit to first 3 for fast testing)
-    all_files = [f for f in os.listdir(images_dir) if f.endswith('.npy')][:3]
+    # Get all cases (limit to first 3 for fast testing)
+    all_files = [f for f in os.listdir(case_dir) if f.endswith('.npy')][:3]
     if len(all_files) < 2:
         print(f"ERROR: Need at least 2 .npy files for testing, found {len(all_files)}")
         sys.exit(1)

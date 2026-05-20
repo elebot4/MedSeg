@@ -114,7 +114,7 @@ def get_surface_points(mask: np.ndarray) -> np.ndarray:
     return np.column_stack(coords)
 
 
-def sensitivity_specificity(pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def sensitivity_specificity(pred: torch.Tensor, target: torch.Tensor):
     """
     Calculate sensitivity (recall) and specificity.
     
@@ -146,9 +146,9 @@ def sensitivity_specificity(pred: torch.Tensor, target: torch.Tensor) -> Tuple[t
 def sliding_window_inference(
     model: torch.nn.Module,
     image: torch.Tensor,
-    window_size: Tuple[int, ...],
+    window_size,
     overlap: float = 0.25
-) -> torch.Tensor:
+):
     """
     Perform sliding window inference for large images.
     

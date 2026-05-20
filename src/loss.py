@@ -7,29 +7,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def dice_loss(p, targets, smooth=1e-6):
+def dice_loss(p, gt_onehot, smooth=1e-6, do_bg=False):
     """
     dice loss function for 2d & 3d segmentation.
     """
 
-    reduce_axis = tuple(range(2, p.ndim)) # exclude batch & channel dimensions
-    t = targets
+    if not do_bg:
+        gt_onehot = gt_onehot[:, 1:] # remove background class for dice loss
+        p = p[:, 1:] 
 
-    intersection = (p * targets).sum(dim = reduce_axis)
-    p = p.sum(dim = reduce_axis)
-    t = targets.sum(dim = reduce_axis)
-    d =  (2 * intersection + smooth) / (p + t + smooth)
+    axes = tuple(range(2, len(p.shape)))
+    intersection = (p * gt_onehot).sum(dim = axes)
+    p_sum = p.sum(dim = axes)
+    gt_sum = gt_onehot.sum(dim = axes)
+    d =  (2 * intersection + smooth) / (p_sum + gt_sum + smooth)
+    return 1 - d.mean() 
 
-    # ignore locations where t is background
-    idx = (t > 0).float()
-    return -(d * idx).sum() / idx.sum().clamp_min(1.0)
-    
-FUNCTIONAL_LOSSES = {
-    "CrossEntropy": F.binary_cross_entropy_with_logits,
-    "Dice": dice_loss,
-    "MSE": F.mse_loss,
-    "L1": F.l1_loss
-}
 
 #def get_loss_fn(args=None):
 #    """
@@ -46,11 +39,11 @@ FUNCTIONAL_LOSSES = {
 
 if __name__ == "__main__":
     # test the loss functions with dummy data
-    loss_fn = get_loss_fn()
+    #loss_fn = get_loss_fn()
     
     logits = torch.randn(2, 2, 4, 4)
     targets = torch.randint(0, 2, (2, 4, 4)).long()
     
-    loss_value = loss_fn(logits, targets)
-    print("Loss value:", loss_value.item())
+    #loss_value = loss_fn(logits, targets)
+    #print("Loss value:", loss_value.item())
 
