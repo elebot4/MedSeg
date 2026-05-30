@@ -1,381 +1,297 @@
 """
-Segmentation report generation for medical images. /!\ this file does not include LLM-based reporting /!\
-Creates human-readable summaries of segmentation results.
+Borrowed from nanochat and adapted for this medical segmentation project.
+Utilities for lightweight experiment report logging and generation.
 """
 
-from pathlib import Path
+import argparse
+import datetime
+import os
+import platform
+import shutil
+import socket
+import subprocess
 
-import numpy as np
+import psutil
 import torch
-import torch.nn.functional as F
 
-from eval import dice_score, iou_score, sensitivity_specificity
-from model import UNet
-
-
-class SegmentationAnalysis:
-    """Container for segmentation analysis results."""
-    def __init__(self):
-        self.volume_mm3 = 0.0
-        self.confidence_score = 0.0
-        self.dice_score = 0.0
-        self.iou_score = 0.0
-        self.centroid = (0.0, 0.0, 0.0)
-        self.bounding_box = (0, 0, 0, 0, 0, 0)  # x1,y1,z1,x2,y2,z2
-        self.shape_metrics = {}
+SECTION_ORDER = [
+    "data-preparation.md",
+    "training.md",
+    "validation.md",
+    "evaluation.md",
+    "quantization.md",
+    "export.md",
+    "segmentation-summary.md",
+]
 
 
-def analyze_segmentation_mask(
-    pred_mask: np.ndarray,
-    target_mask=None,
-    voxel_spacing=(1.0, 1.0, 1.0),
-    class_name: str = "unknown"
-):
-    """
-    Analyze a segmentation mask to extract quantitative metrics.
-    
-    Args:
-        pred_mask: Predicted segmentation mask (binary)
-        target_mask: Ground truth mask (for accuracy metrics)
-        voxel_spacing: Physical spacing between voxels (mm)
-        class_name: Name of the segmented class
-        
-    Returns:
-        Analysis results
-    """
-    if pred_mask.sum() == 0:
-        return SegmentationAnalysis(
-            volume_mm3=0.0,
-            confidence_score=0.0,
-            dice_score=0.0,
-            iou_score=0.0,
-            centroid=(0.0, 0.0, 0.0),
-            bounding_box=(0, 0, 0, 0, 0, 0),
-            shape_metrics={}
+def run_command(cmd):
+    """Run a shell command and return stdout, empty string, or None on failure."""
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-    
-    # Calculate volume in mm³
-    voxel_volume = np.prod(voxel_spacing)
-    volume_mm3 = float(pred_mask.sum() * voxel_volume)
-    
-    # Calculate centroid
-    coords = np.where(pred_mask > 0)
-    centroid = tuple(float(np.mean(coord)) for coord in coords)
-    
-    # Calculate bounding box
-    min_coords = tuple(int(np.min(coord)) for coord in coords)
-    max_coords = tuple(int(np.max(coord)) for coord in coords)
-    bounding_box = min_coords + max_coords
-    
-    # Shape metrics
-    shape_metrics = calculate_shape_metrics(pred_mask, voxel_spacing)
-    
-    # Accuracy metrics (if ground truth available)
-    dice_val = 0.0
-    iou_val = 0.0
-    if target_mask is not None:
-        pred_tensor = torch.from_numpy(pred_mask).unsqueeze(0).unsqueeze(0).float()
-        target_tensor = torch.from_numpy(target_mask).unsqueeze(0).unsqueeze(0).float()
-        dice_val = dice_score(pred_tensor, target_tensor).item()
-        iou_val = iou_score(pred_tensor, target_tensor).item()
-    
-    # Confidence score (placeholder - could use model uncertainty)
-    confidence_score = min(dice_val * 1.2, 1.0) if target_mask is not None else 0.8
-    
-    return SegmentationAnalysis(
-        volume_mm3=volume_mm3,
-        confidence_score=confidence_score,
-        dice_score=dice_val,
-        iou_score=iou_val,
-        centroid=centroid,
-        bounding_box=bounding_box,
-        shape_metrics=shape_metrics
-    )
+    except Exception:
+        return None
+
+    if result.stdout.strip():
+        return result.stdout.strip()
+    if result.returncode == 0:
+        return ""
+    return None
 
 
-def calculate_shape_metrics(mask: np.ndarray, voxel_spacing):
-    """
-    Calculate shape-based metrics for a segmentation mask.
-    
-    Args:
-        mask: Binary segmentation mask
-        voxel_spacing: Physical voxel spacing
-        
-    Returns:
-        Dictionary of shape metrics
-    """
-    from scipy import ndimage
-    
-    metrics = {}
-    
-    # Surface area (approximated)
-    # Use binary gradient to find edges
-    grad_x = np.abs(np.diff(mask.astype(float), axis=0, prepend=0))
-    grad_y = np.abs(np.diff(mask.astype(float), axis=1, prepend=0))
-    grad_z = np.abs(np.diff(mask.astype(float), axis=2, prepend=0))
-    
-    surface_voxels = (grad_x + grad_y + grad_z) > 0
-    surface_area = surface_voxels.sum() * np.mean(voxel_spacing)**2  # Rough approximation
-    metrics['surface_area_mm2'] = float(surface_area)
-    
-    # Sphericity (how sphere-like the object is)
-    volume = mask.sum() * np.prod(voxel_spacing)
-    if volume > 0:
-        sphere_surface_area = (36 * np.pi * volume**2)**(1/3)
-        sphericity = sphere_surface_area / surface_area if surface_area > 0 else 0
-        metrics['sphericity'] = min(float(sphericity), 1.0)
+def get_git_info():
+    """Get git branch/commit status for reproducibility."""
+    info = {}
+    info["commit"] = run_command("git rev-parse --short HEAD") or "unknown"
+    info["branch"] = run_command("git rev-parse --abbrev-ref HEAD") or "unknown"
+    status = run_command("git status --porcelain")
+    info["dirty"] = bool(status) if status is not None else False
+    info["message"] = run_command("git log -1 --pretty=%B") or ""
+    info["message"] = info["message"].split("\n")[0][:80]
+    return info
+
+
+def get_gpu_info():
+    """Get GPU inventory and CUDA version if available."""
+    if not torch.cuda.is_available():
+        return {"available": False}
+
+    names = []
+    memory_gb = []
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        names.append(props.name)
+        memory_gb.append(props.total_memory / (1024**3))
+
+    return {
+        "available": True,
+        "count": torch.cuda.device_count(),
+        "names": names,
+        "memory_gb": memory_gb,
+        "cuda_version": torch.version.cuda or "unknown",
+    }
+
+
+def get_system_info():
+    """Get basic host and runtime information."""
+    return {
+        "hostname": socket.gethostname(),
+        "platform": platform.system(),
+        "python_version": platform.python_version(),
+        "torch_version": torch.__version__,
+        "cpu_count": psutil.cpu_count(logical=False),
+        "cpu_count_logical": psutil.cpu_count(logical=True),
+        "memory_gb": psutil.virtual_memory().total / (1024**3),
+        "user": os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
+        "working_dir": os.getcwd(),
+    }
+
+
+def generate_header():
+    """Generate markdown header for the report."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    git_info = get_git_info()
+    gpu_info = get_gpu_info()
+    sys_info = get_system_info()
+
+    header = f"""# Training Report
+
+Generated: {timestamp}
+
+## Environment
+
+### Git Information
+- Branch: {git_info["branch"]}
+- Commit: {git_info["commit"]} {"(dirty)" if git_info["dirty"] else "(clean)"}
+- Message: {git_info["message"]}
+
+### Hardware
+- Platform: {sys_info["platform"]}
+- CPUs: {sys_info["cpu_count"]} cores ({sys_info["cpu_count_logical"]} logical)
+- Memory: {sys_info["memory_gb"]:.1f} GB
+"""
+
+    if gpu_info.get("available"):
+        gpu_names = ", ".join(sorted(set(gpu_info["names"])))
+        total_vram = sum(gpu_info["memory_gb"])
+        header += f"""- GPUs: {gpu_info["count"]}x {gpu_names}
+- GPU Memory: {total_vram:.1f} GB total
+- CUDA Version: {gpu_info["cuda_version"]}
+"""
     else:
-        metrics['sphericity'] = 0.0
-    
-    # Extent metrics
-    coords = np.where(mask > 0)
-    if len(coords[0]) > 0:
-        ranges = [np.ptp(coord) * spacing for coord, spacing in zip(coords, voxel_spacing)]
-        metrics['extent_x_mm'] = float(ranges[0])
-        metrics['extent_y_mm'] = float(ranges[1])
-        metrics['extent_z_mm'] = float(ranges[2])
-        metrics['max_diameter_mm'] = float(max(ranges))
-    
-    return metrics
+        header += "- GPUs: None available\n"
+
+    header += f"""
+### Software
+- Python: {sys_info["python_version"]}
+- PyTorch: {sys_info["torch_version"]}
+
+"""
+    return header
 
 
-def generate_finding_description(
-    analysis: SegmentationAnalysis,
-    class_name: str,
-    severity_threshold=None
-):
-    """
-    Generate a natural language description of a segmentation finding.
-    
-    Args:
-        analysis: Quantitative analysis results
-        class_name: Name of the segmented anatomical structure
-        severity_threshold: Volume thresholds for severity assessment
-        
-    Returns:
-        Natural language description
-    """
-    if analysis.volume_mm3 == 0:
-        return f"No {class_name} detected."
-    
-    # Default thresholds (can be customized per anatomy)
-    if severity_threshold is None:
-        severity_threshold = {
-            'small': 1000,    # mm³
-            'medium': 5000,   # mm³
-            'large': 15000    # mm³
-        }
-    
-    # Size assessment
-    volume_ml = analysis.volume_mm3 / 1000  # Convert to mL
-    if analysis.volume_mm3 < severity_threshold['small']:
-        size_desc = "small"
-    elif analysis.volume_mm3 < severity_threshold['medium']:
-        size_desc = "moderate-sized"
-    elif analysis.volume_mm3 < severity_threshold['large']:
-        size_desc = "large"
-    else:
-        size_desc = "very large"
-    
-    # Shape assessment
-    sphericity = analysis.shape_metrics.get('sphericity', 0.5)
-    if sphericity > 0.8:
-        shape_desc = "rounded"
-    elif sphericity > 0.6:
-        shape_desc = "oval"
-    else:
-        shape_desc = "irregular"
-    
-    # Confidence assessment
-    confidence_desc = ""
-    if hasattr(analysis, 'confidence_score') and analysis.confidence_score > 0:
-        if analysis.confidence_score > 0.9:
-            confidence_desc = " with high confidence"
-        elif analysis.confidence_score > 0.7:
-            confidence_desc = " with moderate confidence"
-        else:
-            confidence_desc = " with low confidence"
-    
-    # Location description (simplified)
-    x, y, z = analysis.centroid
-    location_desc = f"centered approximately at coordinates ({x:.1f}, {y:.1f}, {z:.1f})"
-    
-    # Measurements
-    max_diameter = analysis.shape_metrics.get('max_diameter_mm', 0)
-    
-    description = (
-        f"A {size_desc} {shape_desc} {class_name} measuring approximately "
-        f"{volume_ml:.1f} mL (volume) with a maximum diameter of {max_diameter:.1f} mm, "
-        f"{location_desc}{confidence_desc}."
-    )
-    
-    return description
+def slugify(text):
+    """Slugify a title into a file name-friendly token."""
+    return text.lower().replace(" ", "-")
 
 
-def generate_comprehensive_report(
-    predictions: torch.Tensor,
-    class_names,
-    voxel_spacing=(1.0, 1.0, 1.0),
-    ground_truth=None,
-    patient_info=None
-):
-    """
-    Generate a comprehensive radiology-style report from segmentation results.
-    
-    Args:
-        predictions: Model predictions [C, D, H, W] or categorical mask [D, H, W]
-        class_names: Names of segmented classes
-        voxel_spacing: Physical voxel spacing (mm)
-        ground_truth: Ground truth masks for accuracy assessment
-        patient_info: Optional patient metadata
-        
-    Returns:
-        Formatted medical report
-    """
-    # Convert predictions to categorical if needed
-    if predictions.ndim == 4 and predictions.shape[0] > 1:
-        pred_mask = F.softmax(predictions, dim=0).argmax(dim=0).numpy()
-    else:
-        pred_mask = predictions.squeeze().numpy()
-    
-    # Convert ground truth if provided
-    gt_mask = ground_truth.numpy() if ground_truth is not None else None
-    
-    # Analyze each class
-    findings = []
-    for class_idx, class_name in enumerate(class_names):
-        if class_idx == 0:  # Skip background
-            continue
-            
-        # Extract binary mask for this class
-        binary_pred = (pred_mask == class_idx).astype(np.uint8)
-        binary_gt = (gt_mask == class_idx).astype(np.uint8) if gt_mask is not None else None
-        
-        # Analyze this finding
-        analysis = analyze_segmentation_mask(
-            binary_pred, binary_gt, voxel_spacing, class_name
+def extract_timestamp(content, prefix):
+    """Extract a timestamp line from markdown content."""
+    for line in content.split("\n"):
+        if line.startswith(prefix):
+            time_str = line.split(":", 1)[1].strip()
+            try:
+                return datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+    return None
+
+
+class Report:
+    """Simple report logger and markdown assembler for experiment runs."""
+
+    def __init__(self, report_dir):
+        os.makedirs(report_dir, exist_ok=True)
+        self.report_dir = report_dir
+
+    def log(self, section, data):
+        """Log one section to a markdown file."""
+        file_name = f"{slugify(section)}.md"
+        file_path = os.path.join(self.report_dir, file_name)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(f"## {section}\n")
+            f.write(
+                f"timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            )
+            for item in data:
+                if not item:
+                    continue
+                if isinstance(item, str):
+                    f.write(item)
+                    if not item.endswith("\n"):
+                        f.write("\n")
+                    continue
+
+                for key, value in item.items():
+                    if isinstance(value, float):
+                        value_str = f"{value:.4f}"
+                    elif isinstance(value, int) and value >= 10000:
+                        value_str = f"{value:,.0f}"
+                    else:
+                        value_str = str(value)
+                    f.write(f"- {key}: {value_str}\n")
+            f.write("\n")
+        return file_path
+
+    def generate(self):
+        """Assemble header + all section files into report.md."""
+        report_file = os.path.join(self.report_dir, "report.md")
+        header_file = os.path.join(self.report_dir, "header.md")
+
+        preferred = set(SECTION_ORDER)
+        present_sections = [
+            name
+            for name in os.listdir(self.report_dir)
+            if name.endswith(".md") and name not in {"header.md", "report.md"}
+        ]
+
+        ordered_sections = [name for name in SECTION_ORDER if name in present_sections]
+        ordered_sections.extend(
+            sorted(name for name in present_sections if name not in preferred)
         )
-        
-        if analysis.volume_mm3 > 0:  # Only include if something was detected
-            description = generate_finding_description(analysis, class_name)
-            findings.append((class_name, description, analysis))
-    
-    # Generate report
-    report_lines = []
-    
-    # Header
-    report_lines.append("AUTOMATED SEGMENTATION REPORT")
-    report_lines.append("=" * 50)
-    report_lines.append("")
-    
-    # Patient info
-    if patient_info:
-        report_lines.append("PATIENT INFORMATION:")
-        for key, value in patient_info.items():
-            report_lines.append(f"  {key.replace('_', ' ').title()}: {value}")
-        report_lines.append("")
-    
-    # Technical parameters
-    report_lines.append("TECHNICAL PARAMETERS:")
-    report_lines.append(f"  Voxel Spacing: {voxel_spacing[0]:.2f} x {voxel_spacing[1]:.2f} x {voxel_spacing[2]:.2f} mm")
-    report_lines.append(f"  Image Dimensions: {pred_mask.shape}")
-    report_lines.append("")
-    
-    # Findings
-    report_lines.append("FINDINGS:")
-    if not findings:
-        report_lines.append("  No significant abnormalities detected.")
-    else:
-        for i, (class_name, description, analysis) in enumerate(findings, 1):
-            report_lines.append(f"  {i}. {description}")
-            
-            # Add quantitative details
-            if analysis.dice_score > 0:  # If ground truth comparison available
-                report_lines.append(f"     Segmentation accuracy: Dice={analysis.dice_score:.3f}, IoU={analysis.iou_score:.3f}")
-    
-    report_lines.append("")
-    
-    # Summary statistics
-    report_lines.append("QUANTITATIVE SUMMARY:")
-    total_volume = sum(analysis.volume_mm3 for _, _, analysis in findings)
-    report_lines.append(f"  Total abnormal tissue volume: {total_volume/1000:.2f} mL")
-    report_lines.append(f"  Number of distinct findings: {len(findings)}")
-    
-    if findings:
-        largest_finding = max(findings, key=lambda x: x[2].volume_mm3)
-        report_lines.append(f"  Largest finding: {largest_finding[0]} ({largest_finding[2].volume_mm3/1000:.2f} mL)")
-    
-    report_lines.append("")
-    
-    # Disclaimer
-    report_lines.append("DISCLAIMER:")
-    report_lines.append("This report was generated by an automated segmentation algorithm.")
-    report_lines.append("All findings should be verified by a qualified radiologist.")
-    report_lines.append("This analysis is for research/educational purposes only.")
-    
-    return "\n".join(report_lines)
+
+        start_time = None
+        end_time = None
+
+        with open(report_file, "w", encoding="utf-8") as out_file:
+            if os.path.exists(header_file):
+                with open(header_file, "r", encoding="utf-8") as f:
+                    header_content = f.read()
+                    out_file.write(header_content)
+                    start_time = extract_timestamp(header_content, "Run started:")
+            else:
+                out_file.write(generate_header())
+                out_file.write("Run started: unknown\n\n---\n\n")
+
+            for file_name in ordered_sections:
+                section_path = os.path.join(self.report_dir, file_name)
+                with open(section_path, "r", encoding="utf-8") as in_file:
+                    section = in_file.read()
+                out_file.write(section)
+                if not section.endswith("\n"):
+                    out_file.write("\n")
+                out_file.write("\n")
+
+                section_ts = extract_timestamp(section, "timestamp:")
+                if section_ts is not None:
+                    end_time = section_ts
+
+            out_file.write("## Summary\n\n")
+            out_file.write(f"- Sections included: {len(ordered_sections)}\n")
+            if start_time and end_time:
+                duration = end_time - start_time
+                total_seconds = int(duration.total_seconds())
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                out_file.write(f"- Total wall clock time: {hours}h{minutes}m\n")
+            else:
+                out_file.write("- Total wall clock time: unknown\n")
+
+        shutil.copy(report_file, "report.md")
+        print(f"Generated report: {report_file}")
+        return report_file
+
+    def reset(self):
+        """Reset report directory content for a fresh run."""
+        for file_name in os.listdir(self.report_dir):
+            if not file_name.endswith(".md"):
+                continue
+            file_path = os.path.join(self.report_dir, file_name)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+        header_file = os.path.join(self.report_dir, "header.md")
+        start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(header_file, "w", encoding="utf-8") as f:
+            f.write(generate_header())
+            f.write(f"Run started: {start_time}\n\n---\n\n")
+
+        print(f"Reset report directory and wrote header: {header_file}")
 
 
-def save_report(
-    report_text: str,
-    output_path: str,
-    format: str = 'txt'
-) -> None:
-    """
-    Save report to file.
-    
-    Args:
-        report_text: Generated report text
-        output_path: Path to save the report
-        format: Output format ('txt', 'html', 'markdown')
-    """
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    if format == 'txt':
-        with open(output_path, 'w') as f:
-            f.write(report_text)
-    elif format == 'markdown':
-        # Convert to markdown format
-        markdown_text = report_text.replace("=" * 50, "---")
-        with open(output_path, 'w') as f:
-            f.write("# " + markdown_text.replace("\n", "\n\n", 1))
-    elif format == 'html':
-        # Simple HTML conversion
-        html_lines = ["<html><head><title>Segmentation Report</title></head><body>"]
-        html_lines.append("<pre style='font-family: monospace;'>")
-        html_lines.append(report_text.replace("\n", "<br>\n"))
-        html_lines.append("</pre></body></html>")
-        with open(output_path, 'w') as f:
-            f.write("\n".join(html_lines))
-    
-    print(f"Report saved to: {output_path}")
+def get_report(report_dir=None):
+    """Get a report instance for the current project."""
+    if report_dir is None:
+        report_dir = os.path.join("outputs", "report")
+    return Report(report_dir)
 
 
 if __name__ == "__main__":
-    # Example usage
-    print("Testing report generation with synthetic data...")
-    
-    # Create synthetic segmentation results
-    pred_mask = np.zeros((64, 64, 64), dtype=np.uint8)
-    pred_mask[20:40, 20:40, 20:40] = 1  # Tumor
-    pred_mask[45:55, 10:20, 10:20] = 2  # Edema
-    
-    # Convert to tensor
-    predictions = torch.from_numpy(pred_mask)
-    
-    # Generate report
-    class_names = ["background", "tumor", "edema"]
-    patient_info = {"patient_id": "TEST001", "scan_date": "2024-01-01"}
-    
-    report = generate_comprehensive_report(
-        predictions=predictions,
-        class_names=class_names,
-        voxel_spacing=(1.0, 1.0, 1.0),
-        patient_info=patient_info
+    parser = argparse.ArgumentParser(
+        description="Generate or reset medical segmentation training reports."
     )
-    
-    print(report)
-    
-    # Save report
-    save_report(report, "reports/example_report.txt")
-    save_report(report, "reports/example_report.html", format='html')
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="generate",
+        choices=["generate", "reset"],
+        help="Operation to perform (default: generate)",
+    )
+    parser.add_argument(
+        "--report_dir",
+        default=os.path.join("outputs", "report"),
+        help="Directory where section markdown files and report.md are stored",
+    )
+    args = parser.parse_args()
+
+    report = get_report(args.report_dir)
+    if args.command == "generate":
+        report.generate()
+    else:
+        report.reset()

@@ -32,6 +32,18 @@ src/
 ├── report.py         # Medical report generation
 └── utils.py          # Memory reporting and utilities
 
+ressources/ # 
+├── images
+└── templates
+
+
+scripts/
+└── report.py # LLM based report generation. Independant from rest of the code.  
+
+data/ # MRI datasets
+├── processed
+└── raw
+
 config/               # Training configurations
 ├── 2d_axi.py         # 2D axial slices (mobile-optimized)
 ├── 2d_cor.py         # 2D coronal slices  

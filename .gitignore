@@ -28,9 +28,11 @@ var/
 .installed.cfg
 *.egg
 
+
 # vscode settings & servers
 .vscode
 .ruff_cache
+uv.lock
 
 #my folders
 import*/
@@ -44,8 +46,10 @@ notebooks/
 results/
 configs/
 preview/
-
+stub/
 old/
+dev/
+
 
 # slurm logs
 slurm/

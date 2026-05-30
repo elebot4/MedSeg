@@ -1,22 +1,23 @@
-
-
-import numpy as np
-import torch
-import torch.nn.functional as F
 import math
 
-def lowres_transform(tensor):
+import torch
+import torch.nn.functional as F
+
+
+def lowres_transform(tensor, p=0.25, p_per_channel=0.5):
     """
     Approximate nnU-Net v2 default low-resolution simulation.
 
     Args:
         tensor: torch.Tensor with shape [C, H, W] or [C, H, W, D]
+        p: Probability of applying the transform (default: 0.25)
+        p_per_channel: Probability of applying per channel (default: 0.5)
 
     Returns:
         torch.Tensor with the same shape.
     """
     # nnU-Net: RandomTransform(..., apply_probability=0.25)
-    if torch.rand((), device=tensor.device) >= 0.25:
+    if torch.rand((), device=tensor.device) >= p:
         return tensor
 
     tensor = tensor.clone()
@@ -31,7 +32,7 @@ def lowres_transform(tensor):
     upsample_mode = upsample_modes[spatial_ndim]
 
     for channel in range(channels):
-        if torch.rand((), device=tensor.device) >= 0.5:
+        if torch.rand((), device=tensor.device) >= p_per_channel:
             continue
 
         scale = torch.empty((), device=tensor.device).uniform_(0.5, 1.0).item()
@@ -46,18 +47,27 @@ def lowres_transform(tensor):
     return tensor
 
 
-def intensity_transform(tensor):
+def intensity_transform(tensor, p_noise=0.1, p_blur=0.2, p_blur_per_channel=0.5, p_brightness=0.15, p_contrast=0.15, p_gamma_inv=0.1, p_gamma=0.3):
     """
     Approximate nnU-Net v2 default intensity augmentation.
 
     Args:
         tensor: torch.Tensor with shape [C, H, W] or [C, H, W, D]
+        p_noise: Probability of Gaussian noise (default: 0.1)
+        p_blur: Probability of Gaussian blur (default: 0.2)
+        p_blur_per_channel: Probability of blur per channel (default: 0.5)
+        p_brightness: Probability of brightness adjustment (default: 0.15)
+        p_contrast: Probability of contrast adjustment (default: 0.15)
+        p_gamma_inv: Probability of gamma with inversion (default: 0.1)
+        p_gamma: Probability of gamma without inversion (default: 0.3)
 
     Returns:
         torch.Tensor with the same shape.
     """
     if tensor.ndim not in (3, 4):
-        raise ValueError(f"Expected [C, H, W] or [C, H, W, D], got {tuple(tensor.shape)}")
+        raise ValueError(
+            f"Expected [C, H, W] or [C, H, W, D], got {tuple(tensor.shape)}"
+        )
 
     tensor = tensor.clone()
     c, *spatial_shape = tensor.shape
@@ -68,16 +78,16 @@ def intensity_transform(tensor):
 
     # 1. Gaussian noise
     # nnU-Net: apply_probability=0.1, noise_variance=(0, 0.1), synchronized across channels.
-    if torch.rand((), device=device) < 0.1:
+    if torch.rand((), device=device) < p_noise:
         sigma = torch.empty((), device=device, dtype=dtype).uniform_(0.0, 0.1)
         tensor = tensor + torch.randn_like(tensor) * sigma
 
     # 2. Gaussian blur
     # nnU-Net: apply_probability=0.2, blur_sigma=(0.5, 1.0),
     #          p_per_channel=0.5, synchronize_channels=False, synchronize_axes=False.
-    if torch.rand((), device=device) < 0.2:
+    if torch.rand((), device=device) < p_blur:
         for channel in range(c):
-            if torch.rand((), device=device) >= 0.5:
+            if torch.rand((), device=device) >= p_blur_per_channel:
                 continue
 
             x = tensor[channel][None, None]
@@ -90,7 +100,9 @@ def intensity_transform(tensor):
                     kernel_size += 1
 
                 half = (kernel_size - 1) / 2
-                grid = torch.linspace(-half, half, kernel_size, device=device, dtype=dtype)
+                grid = torch.linspace(
+                    -half, half, kernel_size, device=device, dtype=dtype
+                )
                 kernel = torch.exp(-0.5 * (grid / sigma).pow(2))
                 kernel = kernel / kernel.sum()
 
@@ -115,7 +127,7 @@ def intensity_transform(tensor):
     # 3. Multiplicative brightness
     # nnU-Net: apply_probability=0.15, multiplier_range=(0.75, 1.25),
     #          per-channel factors.
-    if torch.rand((), device=device) < 0.15:
+    if torch.rand((), device=device) < p_brightness:
         for channel in range(c):
             factor = torch.empty((), device=device, dtype=dtype).uniform_(0.75, 1.25)
             tensor[channel] = tensor[channel] * factor
@@ -123,7 +135,7 @@ def intensity_transform(tensor):
     # 4. Contrast
     # nnU-Net: apply_probability=0.15, contrast_range=(0.75, 1.25),
     #          preserve_range=True, per-channel factors.
-    if torch.rand((), device=device) < 0.15:
+    if torch.rand((), device=device) < p_contrast:
         for channel in range(c):
             x = tensor[channel]
             old_min = x.min()
@@ -137,7 +149,7 @@ def intensity_transform(tensor):
     # 5a. Gamma with inversion
     # nnU-Net: apply_probability=0.1, gamma=(0.7, 1.5),
     #          p_invert_image=1, p_retain_stats=1, per-channel gamma.
-    if torch.rand((), device=device) < 0.1:
+    if torch.rand((), device=device) < p_gamma_inv:
         for channel in range(c):
             x = tensor[channel]
             old_mean = x.mean()
@@ -160,7 +172,7 @@ def intensity_transform(tensor):
     # 5b. Gamma without inversion
     # nnU-Net: apply_probability=0.3, gamma=(0.7, 1.5),
     #          p_invert_image=0, p_retain_stats=1, per-channel gamma.
-    if torch.rand((), device=device) < 0.3:
+    if torch.rand((), device=device) < p_gamma:
         for channel in range(c):
             x = tensor[channel]
             old_mean = x.mean()
@@ -180,35 +192,41 @@ def intensity_transform(tensor):
     return tensor
 
 
-
-
-
-def spatial_transform(tensor, target, rotation_degrees=15):
+def spatial_transform(tensor, target, rotation_degrees=15, p_rotation=0.2, p_scaling=0.2):
     """
     Approximate nnU-Net v2 default spatial transform.
 
     Args:
         tensor:  [C, H, W] or [C, D, H, W]
         target: [C, H, W] or [C, D, H, W]
+        rotation_degrees: Maximum rotation angle in degrees (default: 15)
+        p_rotation: Probability of rotation (default: 0.2)
+        p_scaling: Probability of scaling (default: 0.2)
 
     Returns:
         Transformed img and mask with the same shape.
     """
     if tensor.shape[1:] != target.shape[1:]:
-        raise ValueError(f"tensor and target spatial shapes differ: {tensor.shape} vs {target.shape}")
+        raise ValueError(
+            f"tensor and target spatial shapes differ: {tensor.shape} vs {target.shape}"
+        )
 
     if tensor.ndim not in (3, 4):
-        raise ValueError(f"Expected tensor shape [C, H, W] or [C, D, H, W], got {tuple(tensor.shape)}")
+        raise ValueError(
+            f"Expected tensor shape [C, H, W] or [C, D, H, W], got {tuple(tensor.shape)}"
+        )
 
     if target.ndim != tensor.ndim:
-        raise ValueError(f"tensor and target must have same ndim, got {tensor.ndim} and {target.ndim}")
+        raise ValueError(
+            f"tensor and target must have same ndim, got {tensor.ndim} and {target.ndim}"
+        )
 
     device = tensor.device
     dtype = tensor.dtype
     spatial_ndim = tensor.ndim - 1
 
-    do_rotation = torch.rand((), device=device) < 0.2
-    do_scaling = torch.rand((), device=device) < 0.2
+    do_rotation = torch.rand((), device=device) < p_rotation
+    do_scaling = torch.rand((), device=device) < p_scaling
 
     if not do_rotation and not do_scaling:
         return tensor, target
@@ -253,23 +271,47 @@ def spatial_transform(tensor, target, rotation_degrees=15):
         cy, sy = torch.cos(ay), torch.sin(ay)
         cz, sz = torch.cos(az), torch.sin(az)
 
-        rx = torch.stack([
-            torch.stack([torch.ones((), device=device, dtype=dtype), torch.zeros((), device=device, dtype=dtype), torch.zeros((), device=device, dtype=dtype)]),
-            torch.stack([torch.zeros((), device=device, dtype=dtype), cx, -sx]),
-            torch.stack([torch.zeros((), device=device, dtype=dtype), sx, cx]),
-        ])
+        rx = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.ones((), device=device, dtype=dtype),
+                        torch.zeros((), device=device, dtype=dtype),
+                        torch.zeros((), device=device, dtype=dtype),
+                    ]
+                ),
+                torch.stack([torch.zeros((), device=device, dtype=dtype), cx, -sx]),
+                torch.stack([torch.zeros((), device=device, dtype=dtype), sx, cx]),
+            ]
+        )
 
-        ry = torch.stack([
-            torch.stack([cy, torch.zeros((), device=device, dtype=dtype), sy]),
-            torch.stack([torch.zeros((), device=device, dtype=dtype), torch.ones((), device=device, dtype=dtype), torch.zeros((), device=device, dtype=dtype)]),
-            torch.stack([-sy, torch.zeros((), device=device, dtype=dtype), cy]),
-        ])
+        ry = torch.stack(
+            [
+                torch.stack([cy, torch.zeros((), device=device, dtype=dtype), sy]),
+                torch.stack(
+                    [
+                        torch.zeros((), device=device, dtype=dtype),
+                        torch.ones((), device=device, dtype=dtype),
+                        torch.zeros((), device=device, dtype=dtype),
+                    ]
+                ),
+                torch.stack([-sy, torch.zeros((), device=device, dtype=dtype), cy]),
+            ]
+        )
 
-        rz = torch.stack([
-            torch.stack([cz, -sz, torch.zeros((), device=device, dtype=dtype)]),
-            torch.stack([sz, cz, torch.zeros((), device=device, dtype=dtype)]),
-            torch.stack([torch.zeros((), device=device, dtype=dtype), torch.zeros((), device=device, dtype=dtype), torch.ones((), device=device, dtype=dtype)]),
-        ])
+        rz = torch.stack(
+            [
+                torch.stack([cz, -sz, torch.zeros((), device=device, dtype=dtype)]),
+                torch.stack([sz, cz, torch.zeros((), device=device, dtype=dtype)]),
+                torch.stack(
+                    [
+                        torch.zeros((), device=device, dtype=dtype),
+                        torch.zeros((), device=device, dtype=dtype),
+                        torch.ones((), device=device, dtype=dtype),
+                    ]
+                ),
+            ]
+        )
 
         rotation = rz @ ry @ rx
 
@@ -280,55 +322,64 @@ def spatial_transform(tensor, target, rotation_degrees=15):
 
         grid = F.affine_grid(theta, img_batch.shape, align_corners=False)
 
-    img_out = F.grid_sample(img_batch, grid, mode="bilinear", padding_mode="zeros", align_corners=False)[0]
-    mask_out = F.grid_sample(mask_batch, grid, mode="nearest", padding_mode="zeros", align_corners=False)[0]
+    img_out = F.grid_sample(
+        img_batch, grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    )[0]
+    mask_out = F.grid_sample(
+        mask_batch, grid, mode="nearest", padding_mode="zeros", align_corners=False
+    )[0]
 
-    mask_out = torch.round(mask_out).long()
-    
+    mask_out = mask_out.long()
+
     return img_out, mask_out
 
 
 if __name__ == "__main__":
     print("Testing spatial_transform...")
-    
+
     # Test 2D case
     print("\n2D Test:")
     img_2d = torch.randn(1, 64, 64)  # [C, H, W]
     mask_2d = torch.randint(0, 4, (1, 64, 64)).float()  # [C, H, W]
-    
+
     print(f"Input img shape: {img_2d.shape}")
     print(f"Input mask shape: {mask_2d.shape}")
-    
+
     img_out, mask_out = spatial_transform(img_2d, mask_2d)
-    
+
     print(f"Output img shape: {img_out.shape}")
     print(f"Output mask shape: {mask_out.shape}")
-    print(f"2D test passed: {img_out.shape == img_2d.shape and mask_out.shape == mask_2d.shape}")
-    
+    print(
+        f"2D test passed: {img_out.shape == img_2d.shape and mask_out.shape == mask_2d.shape}"
+    )
+
     # Test 3D case
     print("\n3D Test:")
     img_3d = torch.randn(1, 32, 64, 64)  # [C, D, H, W]
     mask_3d = torch.randint(0, 4, (1, 32, 64, 64)).float()  # [C, D, H, W]
-    
+
     img_out, mask_out = spatial_transform(img_3d, mask_3d)
-    
+
     print(f"Output img shape: {img_out.shape}")
     print(f"Output mask shape: {mask_out.shape}")
-    print(f"3D test passed: {img_out.shape == img_3d.shape and mask_out.shape == mask_3d.shape}")
-    
+    print(
+        f"3D test passed: {img_out.shape == img_3d.shape and mask_out.shape == mask_3d.shape}"
+    )
+
     print("\nAll tests passed!")
-    
+
     img_out, mask_out = spatial_transform(img_3d, mask_3d)
-    
+
     print(f"Output img shape: {img_out.shape}")
     print(f"Output mask shape: {mask_out.shape}")
-    print(f"3D test passed: {img_out.shape == img_3d.shape and mask_out.shape == mask_3d.shape}")
-    
+    print(
+        f"3D test passed: {img_out.shape == img_3d.shape and mask_out.shape == mask_3d.shape}"
+    )
+
     # Test multiple runs to check consistency
     print("\nConsistency test (3 runs):")
     for i in range(3):
         img_out, mask_out = spatial_transform(img_2d.clone(), mask_2d.clone())
-        print(f"Run {i+1}: shapes match = {img_out.shape == img_2d.shape}")
-    
-    print("\nAll tests completed.")
+        print(f"Run {i + 1}: shapes match = {img_out.shape == img_2d.shape}")
 
+    print("\nAll tests completed.")

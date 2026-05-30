@@ -39,7 +39,7 @@ fi
 echo "✅ Found processed data"
 
 # Training options
-CONFIG=${1:-"config/2d_axi.py"}
+CONFIG=${1:-"config/Task01_BrainTumour/2d_axi.py"}
 echo "Using config: $CONFIG"
 
 # Launch training
@@ -82,7 +82,7 @@ echo "🚀 Starting training with $CONFIG"
 echo "   Output: $CHECKPOINT_DIR"
 echo ""
 
-python src/train.py --config="$CONFIG"
+python src/base_train.py "$CONFIG"
 
 # Step 4: Success message
 echo ""

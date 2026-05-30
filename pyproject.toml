@@ -1,7 +1,59 @@
 [project]
-name = "on-device-medical-seg"
+name = "msd-medseg"
 version = "0.1.0"
-description = "Add your description here"
+description = "Minimal repository for training 2.5D and 3D neural networks on the Medical Segmentation Decathlon dataset"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.24.0",
+    "nibabel>=4.0.2",
+    "scikit-image>=0.20.0",
+    "fastapi>=0.117.1",
+    "uvicorn>=0.36.0",
+    "torch>=2.11.0",
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+    "torchao>=0.7.0",
+    "psutil>=7.2.2",
+]
+
+
+[dependency-groups]
+
+dev = [
+    "ipykernel>=7.1.0",
+    "matplotlib>=3.10.8",
+    "pytest>=8.0.0",
+    "python-dotenv>=1.2.1", 
+    "wandb>=0.27.0",
+]
+
+[project.optional-dependencies]
+
+llm = [
+    "transformers>=4.57.0",
+    "accelerate>=1.11.0"
+]
+
+onnx = [
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv]
+default-groups = []
+environments = [
+    "sys_platform == 'win32'",
+]
+
+[tool.ty.src]
+exclude = ["**/stub/", "**/scripts/"]
+
