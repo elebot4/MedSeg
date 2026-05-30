@@ -13,7 +13,7 @@ Include a LLM-based report generation to summarize the findings obtained by the 
 | :--- | :--- | :--- |
 | **Phase 1** | Core Training Pipeline (2.5D/3D U-Net, Deep Supervision) | ✅ Complete |
 | **Phase 2** | **Edge Optimization (PTQ, ONNX Export & Benchmarking)** | 🚧 **In Progress** |
-| **Phase 3** | **LLM Integration (Automated Clinical Report Generation)** | 🚧 **In Progress** |
+| **Phase 3** | **LLM Integration (Automated Findings Report Generation)** | 🚧 **In Progress** |
 
 ## 📁 Project Structure
 
