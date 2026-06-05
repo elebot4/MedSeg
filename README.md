@@ -1,137 +1,151 @@
-# 🔬 Medical Segmentation Mobile
+# MedSeg: Medical Segmentation Training, Benchmarking & Deployment
 
-Status: 🏗️ WIP - Phase 2 (Optimization & Edge Deployment)
+A research-engineering workbench for training, evaluating, benchmarking, and deploying medical image segmentation models across PyTorch, ONNX Runtime, CPU/GPU, CLI, and API-based settings.
 
-Minimal, clean codebase for training 2D/3D UNet variants for medical image segmentation, with a focus on respecting memory constraints for edge/mobile inference. 
+## Project scope
 
-Include a LLM-based report generation to summarize the findings obtained by the segmentation model.
+MedSeg focuses on the engineering path around medical image segmentation models: training, evaluation, inference, benchmarking, deployment-oriented execution, and structured output generation.
 
+It is not a mobile application, not a clinically validated system, and not intended to claim state-of-the-art segmentation performance.
 
-## 🗺️ Project Roadmap
+## Features
 
-| Phase | Milestone | Status |
-| :--- | :--- | :--- |
-| **Phase 1** | Core Training Pipeline (2.5D/3D U-Net, Deep Supervision) | ✅ Complete |
-| **Phase 2** | **Edge Optimization (PTQ, ONNX Export & Benchmarking)** | 🚧 **In Progress** |
-| **Phase 3** | **LLM Integration (Automated Findings Report Generation)** | 🚧 **In Progress** |
+- Configurable training for 2D and 3D U-Net segmentation variants.
+- Medical image preprocessing and augmentation utilities.
+- Evaluation utilities for segmentation quality analysis.
+- Batch prediction with a PyTorch inference path.
+- ONNX export and ONNX Runtime inference experiments.
+- Latency, memory, model-size, and quality benchmarking.
+- Optional quantization experiments for CPU-constrained inference.
+- FastAPI serving path for deployment-oriented testing.
+- Structured summary generation from segmentation outputs.
 
-## 📁 Project Structure
+## What this project is not
 
-```
+- Not a clinically validated tool.
+- Not a diagnostic system.
+- Not a mobile application.
+- Not a production deployment platform.
+- Not a claim of state-of-the-art segmentation performance.
+
+## Status
+
+| Component | Status | Notes |
+|---|---|---|
+| Training pipeline | Working | 2D / 3D U-Net variants with configurable runs |
+| Evaluation | Working | Segmentation-quality metrics over saved cases |
+| Batch prediction | Working | CLI wrapper for checkpoint-based inference |
+| ONNX export | In progress | Export available, parity checks being expanded |
+| Quantization | Experimental | Optional CPU-constrained benchmark workflow |
+| API deployment | Working | Minimal FastAPI wrapper for model inference |
+| Benchmarking | In progress | Runtime + memory + environment outputs |
+| Structured reporting | In progress | Deterministic summary first, LLM optional |
+| CI/tests | In progress | Existing checks plus incremental coverage |
+
+## Repository layout
+
+```text
 src/
-├── config.py         # nanoGPT-style configuration system
-├── model.py          # UNet variants (2D/3D) with deep supervision
-├── dataset.py        # Medical data loading (axial/coronal/sagittal/fullres)
-├── transforms.py     # Medical augmentations (spatial/intensity)
-├── loss.py           # Dice + CrossEntropy losses
-├── optim.py          # Optimizers (AdamW/SGD) with proper parameter grouping
-├── train.py          # Training loop 
-├── eval.py           # 2.5D Inference & evaluation 
-├── export.py         # ONNX export for mobile deployment
-├── quantize.py       # Post-training quantization utilities
-├── report.py         # Medical report generation
-└── utils.py          # Memory reporting and utilities
+    base_train.py
+    train.py
+    eval.py
+    predict.py
+    serve.py
+    benchmark.py
+    export.py
+    quantize.py
+    report.py
+    model.py
+    dataset.py
+    transforms.py
+    loss.py
+    optim.py
+    config.py
+    utils.py
 
-ressources/ # 
-├── images
-└── templates
-
-
+config/Task01_BrainTumour/
 scripts/
-└── report.py # LLM based report generation. Independant from rest of the code.  
-
-data/ # MRI datasets
-├── processed
-└── raw
-
-config/               # Training configurations
-├── 2d_axi.py         # 2D axial slices (mobile-optimized)
-├── 2d_cor.py         # 2D coronal slices  
-├── 2d_sag.py         # 2D sagittal slices
-└── 3d_fullres.py     # 3D full resolution (high accuracy)
+outputs/
+resources/
 ```
 
-## 🚀 Quick Start
-
-### 1. Setup Environment
+## Install
 
 ```bash
-# Clone and setup
-git clone <repository>
+pip install -e ".[onnx]"
+```
+
+Optional full extras:
+
+```bash
+pip install -e ".[onnx,llm]"
+```
+
+## Reviewer quickstart
+
+```bash
+git clone https://github.com/elebot4/on-device-medical-seg
 cd on-device-medical-seg
 
-# Install dependencies
-pip install -r requirements.txt
+pip install -e ".[onnx]"
+
+# Expected raw data source: BraTS under data/raw/Task01_BrainTumour
+python scripts/prepare.py --raw_dir ./data/raw/Task01_BrainTumour --save_dir ./data/processed
+
+# Training (config-first style)
+python src/train.py config/Task01_BrainTumour/2d_axi.py
+
+# Evaluation on saved run directory
+python src/eval.py --eval_dir outputs/Task01_2d_axi_jun03 --do_surface
+
+# Single-volume prediction
+python src/predict.py --backend pytorch --checkpoint outputs/Task01_2d_axi_jun03/checkpoints/ckpt_best.pt --input data/processed/Task01_BrainTumour/BRATS_001/image.npy --output outputs/demo/brats_001_pred.npy --summary outputs/demo/brats_001_summary.json
+
+# Benchmark (PyTorch CPU and ONNX CPU)
+python src/benchmark.py --checkpoint outputs/Task01_2d_axi_jun03/checkpoints/ckpt_best.pt --input_dir data/processed/Task01_BrainTumour --labels_dir data/processed/Task01_BrainTumour --backends pytorch_cpu onnx_cpu --output docs/benchmarks/results.csv
+
+# API serve
+python src/serve.py --backend pytorch --checkpoint outputs/Task01_2d_axi_jun03/checkpoints/ckpt_best.pt --device cpu --host 0.0.0.0 --port 8080
 ```
 
-### 2. Prepare Data
+This workflow validates software behavior and deployment tradeoffs. It is not intended to demonstrate clinical segmentation performance.
 
-```bash
-# Process raw medical data to expected format
-python scripts/prepare.py --raw_dir ./BraTS2021 --save_dir ./data/processed
-```
+## Quantization status
 
-### 3. Train Models
+Quantization is included as an exploratory experiment for CPU-constrained inference. It is not required for the main training, benchmarking, and deployment workflow.
 
-```bash
-# Complete training pipeline
-bash train.sh
+Current focus:
 
-# Or specific configs
-bash train.sh config/2d_axi.py    # Mobile-optimized 2D
-bash train.sh config/3d_fullres.py # High-accuracy 3D
+- Measure latency changes.
+- Measure model-size changes.
+- Quantify segmentation-quality degradation.
 
-# training parameters can be overriden in the terminal as follow
-python src/train.py config/2d_axi.py --batch_size=4 --learning_rate=0.001
-```
+## Benchmark snapshot (CPU)
 
-## 📱 Optimization & Edge Deployment (WIP)
+The following comparison was run with identical settings across backends:
 
-```python
-# Export trained model
-from src.export import export_to_onnx
-export_to_onnx(model, "model.onnx", dynamic_axes=True)
+- Input: `data/benchmark/synthetic_case/image.npy` (single synthetic case, shape `(4, 8, 256, 256)`)
+- Warmup: `1`
+- Cases: `1`
+- Device: CPU
 
-# Quantize for mobile
-from src.quantize import prepare_ptq, calibrate_ptq, finalize_ptq
-quantized_model = prepare_ptq(model, backend="qnnpack")
-# ... calibration ...
-final_model = finalize_ptq(quantized_model)
-```
+Artifacts:
 
-## 🏥 Medical Reports (WIP)
+- FP32/ONNX: `results/benchmark_comparison/fp32/results.csv`
+- Quantized: `results/benchmark_comparison/quantized/results.csv`
 
-Generate human-readable segmentation summaries:
+| Backend | Mean latency (ms) | Peak RAM (MB) | Model size (MB) | Relative speed vs FP32 PyTorch |
+|---|---:|---:|---:|---:|
+| PyTorch CPU (FP32) | 8433.504 | 663.85 | 64.631 | 1.00x |
+| ONNX Runtime CPU | 2192.936 | 810.62 | 32.579 | 3.85x faster |
+| PyTorch CPU (Quantized PTQ) | 9163.939 | 647.88 | 32.320 | 0.92x (slower) |
 
-```python
-from src.report import generate_comprehensive_report
+Interpretation:
 
-report = generate_comprehensive_report(
-    predictions=model_output,
-    class_names=["background", "tumor", "edema"],
-    voxel_spacing=(1.0, 1.0, 1.0)
-)
-print(report)
-```
+- ONNX Runtime is faster than FP32 PyTorch on this setup.
+- PTQ reduced model size by about 50% (`64.631 MB -> 32.320 MB`) with slightly lower peak RAM.
+- PTQ did not improve latency in this run, which is backend and workload dependent.
 
-## 🔧 Development
-
-```bash
-# Test individual components
-python src/model.py     # Test model architecture
-python src/dataset.py   # Test data loading
-python src/transforms.py # Test augmentations
-
-# Run evaluation
-python src/eval.py --checkpoint checkpoints/best_model.pth --test_dir ./data/test
-```
-
-## 📜 License
+## License
 
 MIT License (see LICENSE.md)
-
-## 🙏 Acknowledgements  
-
-- [karpathy/nanochat](https://github.com/karpathy/nanochat) - Design philosophy inspiration
-- [nnUNet](https://github.com/MIC-DKFZ/nnUNet) - Medical segmentation insights
-- Medical imaging community datasets

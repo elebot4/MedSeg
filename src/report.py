@@ -1,5 +1,5 @@
 """
-Borrowed from nanochat and adapted for this medical segmentation project.
+Borrowed from nanochat.
 Utilities for lightweight experiment report logging and generation.
 """
 
@@ -21,7 +21,6 @@ SECTION_ORDER = [
     "evaluation.md",
     "quantization.md",
     "export.md",
-    "segmentation-summary.md",
 ]
 
 

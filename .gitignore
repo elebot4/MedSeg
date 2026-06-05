@@ -39,6 +39,7 @@ import*/
 scripts/
 logs/
 data/
+outputs/
 
 # dev. specific folders
 experiments/
@@ -49,6 +50,9 @@ preview/
 stub/
 old/
 dev/
+
+TODO.md
+LOG.md
 
 
 # slurm logs

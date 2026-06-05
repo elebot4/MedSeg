@@ -23,7 +23,7 @@ out_dir = None  # If None, save next to source checkpoint
 num_workers = 0
 
 # Quantization settings
-backend = "qnnpack"  # qnnpack (mobile) or x86 (server)
+backend = "qnnpack"  # qnnpack (CPU-constrained) or x86 (server-class)
 nb_steps = 8
 
 # -----------------------------------------------------------------------------

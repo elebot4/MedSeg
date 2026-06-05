@@ -1,11 +1,15 @@
 [project]
-name = "msd-medseg"
+name = "medseg-training-benchmark-deployment"
 version = "0.1.0"
-description = "Minimal repository for training 2.5D and 3D neural networks on the Medical Segmentation Decathlon dataset"
+description = "Medical segmentation training, benchmarking, and deployment workbench."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "pyyaml>=6.0.0",
+    "tqdm>=4.64.0",
+    "scipy>=1.9.0",
     "nibabel>=4.0.2",
     "scikit-image>=0.20.0",
     "fastapi>=0.117.1",
@@ -17,6 +21,28 @@ dependencies = [
     "psutil>=7.2.2",
 ]
 
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+keywords = [
+    'deep learning',
+    'computer aided diagnosis',
+    'medical image analysis',
+    'medseg',
+    'segmentation',
+    'image segmentation',
+    'neural networks',
+    'medical imaging',
+    'machine learning',
+    'pytorch',
+]
 
 [dependency-groups]
 

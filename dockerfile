@@ -1,9 +1,12 @@
-FROM pytorch/pytorch:latest
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 WORKDIR /app
 
-# copy requirements file & install python libraries
-COPY requirements.txt requirements.txt
-RUN python -m pip install -r requirements.txt
+# Install package in editable mode with ONNX extras.
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY config ./config
+COPY scripts ./scripts
+RUN python -m pip install --upgrade pip && pip install -e ".[onnx]"
 
 # copy remaining source code
 COPY . .
@@ -20,5 +23,5 @@ RUN apt-get update \
 USER nonroot
 EXPOSE 8080
 
-# run shell by default
-CMD ["/bin/bash"]
+# run API server by default
+CMD ["python", "src/serve.py", "--backend", "pytorch", "--device", "cpu", "--host", "0.0.0.0", "--port", "8080"]

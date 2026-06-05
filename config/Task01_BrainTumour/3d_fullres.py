@@ -1,7 +1,7 @@
 # 3D Full Volume Training - High Accuracy
 # For research/server deployment where accuracy matters most
 
-input_shape = (128, 128, 128)  # target 3D volume shape
+input_shape = (96, 96, 96)  # target 3D volume shape
 slice_mode = "fullres"  # full resolution 3D patches
 in_channels = 4  # single channel input
 
@@ -13,15 +13,17 @@ dropout = 0.2  # regularization for better generalization
 
 # Conservative training
 batch_size = 1  # memory intensive with 3D
-learning_rate = 3e-4  # conservative lr
-weight_decay = 1e-2
+learning_rate = 1e-2
+weight_decay = 3e-5
 nb_epochs = 1000  # longer training
+optimizer = "SGD"
+momentum = 0.99
 
 # Scheduler for long training
-scheduler = "OneCycleLR"
-gamma = 0.95
+scheduler = "PolyLR"
+gamma = 0.9
 
 device = "cuda"
 dtype = "float32"  # full precision for research
 
-run_name = "Task01_2d_fullres"
+run_name = "Task01_3d_fullres"

@@ -1,6 +1,6 @@
 """
 ONNX export functionality for medical segmentation models.
-Supports dynamic input shapes for deployment on mobile/edge devices.
+Supports dynamic input shapes for deployment-oriented inference.
 """
 
 from typing import Any, cast

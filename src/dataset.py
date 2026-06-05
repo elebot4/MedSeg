@@ -146,7 +146,7 @@ class SegmentationDataset(Dataset):
         mask = mask[0].long()
 
         # remap -1 to 0 in mask (if present) to ensure valid class labels
-        mask[mask == -1] = 0
+        #mask[mask == -1] = 0
 
         return img, mask
 
@@ -157,7 +157,7 @@ def get_dataloaders(
     slice_mode="fullres",
     input_shape=(32, 32, 32),
     train_split=0.8,
-    num_workers=0,
+    num_workers=2,
     sample_per_epoch=250,
     seed=42,
 ):
@@ -177,7 +177,7 @@ def get_dataloaders(
     if not 0 < train_split < 1:
         raise ValueError(f"train_split must be between 0 and 1, got {train_split}")
 
-    if slice_mode is 'fullres' and len(input_shape) != 3:
+    if slice_mode == 'fullres' and len(input_shape) != 3:
         raise ValueError(f"input_shape must be a 3-tuple for fullres mode, got {input_shape}")
     elif slice_mode in ['axi', 'cor', 'sag'] and len(input_shape) != 2:
         raise ValueError(f"input_shape must be 2-tuple for axial slicing modes, got {input_shape}")
@@ -228,6 +228,7 @@ def get_dataloaders(
         slice_mode=slice_mode,
         input_shape=input_shape,
         augment=True,
+
     )
     val_dataset = SegmentationDataset(
         data_dir,
@@ -251,12 +252,14 @@ def get_dataloaders(
         sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=0,
         pin_memory=pin_memory,
     )
 

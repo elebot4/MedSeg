@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 
+import wandb
 from dataset import get_dataloaders
 from loss import dice_loss
 from model import UNet
@@ -33,9 +34,9 @@ class DummyWandb:
 # -----------------------------------------------------------------------------
 # Default config values - just simple variables!
 # I/O settings
-out_dir = "outputs"
+out_dir = "outputs/dummy"
 eval_interval = 10
-log_interval = 5
+log_interval = 10
 save_interval = 10
 device = "cuda"
 
@@ -88,12 +89,17 @@ checkpoint = None  # Path to checkpoint to resume training (optional)
 # Load config overrides
 
 _config_path = os.path.join(os.path.dirname(__file__), "config.py")
+exec(open(_config_path).read())
+
+# save training config
+
 config_keys = [
     k
     for k, v in globals().items()
-    if not k.startswith("_") and isinstance(v, (int, float, bool, str))
+    if not k.startswith("_") and isinstance(v, (int, float, bool, str, tuple))
 ]
-exec(open(_config_path).read())
+config = {key: globals()[key] for key in config_keys}
+
 
 # Define pytorch dtype used for mixed precision based on config
 ptdtype = {"float32": torch.float32, "float16": torch.float16}[dtype]
@@ -110,6 +116,12 @@ wb_config = (
     if wandb_log
     else None
 )
+
+
+def _propagate_last_channel_to_first_foreground(onehot: torch.Tensor) -> torch.Tensor:
+    if onehot.shape[1] > 2:
+        onehot[:, 1] = torch.maximum(onehot[:, 1], onehot[:, -1])
+    return onehot
 
 
 def train(
@@ -154,15 +166,15 @@ def train(
     torch.manual_seed(42)
 
     # Ensure output directory exists
-    run_dir = os.path.join(out_dir, f"{wb_config['name'] if wb_config else 'run_' + time.strftime('%b%d').lower()}")
+    run_dir = os.path.join(
+        out_dir,
+        f"{wb_config['name'] if wb_config else 'run_' + time.strftime('%b%d').lower()}",
+    )
     os.makedirs(run_dir, exist_ok=True)
 
     # wandb
-    wandb_run = DummyWandb()
-    if wb_config is not None:
-        import wandb
+    wandb_run = DummyWandb() if not wandb_log else wandb.init(**wb_config)
 
-        wandb_run = wandb.init(**wb_config)
     # 2. Data
     train_loader, val_loader = get_dataloaders(
         data_dir, batch_size, slice_mode=slice_mode, input_shape=input_shape
@@ -251,6 +263,7 @@ def train(
     for epoch in range(start_epoch, nb_epochs):
         model.train()
         t0 = time.time()
+        dt = t0
 
         for batch_idx, (batch, gt) in enumerate(train_loader):
             batch = batch.to(device_obj, non_blocking=True)
@@ -266,13 +279,17 @@ def train(
                 # Doing this here on GPU reduce CPU-GPU transfer overhead
                 # Doing dice loss without one-hot encoding is very bad depending on the number of classes
                 gt_shape = (gt.shape[0], out_channels, *gt.shape[1:])
+
                 gt_onehot = torch.zeros(gt_shape, device=device_obj, dtype=ptdtype)
                 gt_onehot.scatter_(
                     1, gt.unsqueeze(1), 1
                 )  # [B, D, H, W] -> [B, C, D, H, W]
-                weights = [2**i for i in range(num_stages - 1)]
+                gt_onehot = _propagate_last_channel_to_first_foreground(gt_onehot)
+                weights = [1 / 2**i for i in range(num_stages - 1)]
+                weights[-1] = 0.0
                 weight_sum = float(sum(weights))
                 weights = [w / weight_sum for w in weights]
+
                 for i, (weight, p) in enumerate(zip(weights, reversed(preds))):
                     stride = 2**i
                     # Strided views for 2D and 3D masks
@@ -297,13 +314,13 @@ def train(
 
             # Log training progress
             if batch_idx % log_interval == 0:
-                dt = time.time() - t0
-                t0 = time.time()
+                dt = time.time() - dt
                 lr = scheduler.get_last_lr()[0]
                 lossf = loss.item()  # ty:ignore
                 print(
                     f"Epoch {epoch + 1}/{nb_epochs} [{batch_idx * batch_size}/250] Loss: {lossf:.4f} | LR: {lr:.6f} | Time: {dt:.2f}s"
                 )
+                dt = time.time()
                 wandb_run.log(
                     {
                         "train/loss": lossf,
@@ -326,9 +343,11 @@ def train(
                     gt_shape = (gt.shape[0], out_channels, *gt.shape[1:])
                     gt_onehot = torch.zeros(gt_shape, device=device_obj, dtype=ptdtype)
                     gt_onehot.scatter_(1, gt.unsqueeze(1), 1)
+                    gt_onehot = _propagate_last_channel_to_first_foreground(gt_onehot)
 
                     p_onehot = torch.zeros_like(gt_onehot)
                     p_onehot.scatter_(1, p.argmax(dim=1, keepdim=True), 1)
+                    p_onehot = _propagate_last_channel_to_first_foreground(p_onehot)
                     val_dice += 1 - dice_loss(
                         p_onehot, gt_onehot
                     )  # 1 - (1-dice) = dice
@@ -362,6 +381,7 @@ def train(
                 "epoch": epoch,
                 "scaler": scaler.state_dict(),
                 "best_val_dice": best_val_dice,
+                "config": config,
             }
             os.makedirs(os.path.join(run_dir, "checkpoints"), exist_ok=True)
             torch.save(
@@ -374,6 +394,21 @@ def train(
 
     # Save final model checkpoint
     torch.save(state_dict, os.path.join(run_dir, "checkpoints", "ckpt_final.pt"))
+
+    # generate training report card
+    from report import get_report
+
+    get_report().log(
+        section="Base model training",
+        data=[
+            "Minimum ETA val dice: {:.4f}".format(best_val_dice),
+            "Final ETA val dice: {:.4f}".format(mean_val_dice),
+            "Peak GPU memory usage: {:.2f} GB".format(
+                torch.cuda.max_memory_allocated() / 1e9
+            ),
+            "Total training time: {:.2f} hours".format((time.time() - t0) / 3600),
+        ],
+    )
 
     wandb_run.finish()
 
